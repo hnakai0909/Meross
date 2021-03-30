@@ -9,7 +9,6 @@ if (typeof(URL) === 'undefined') {
 }
 
 const util = require('util')
-const uuid4 = require('uuid4')
 const md5 = require('md5')
 const term = require( 'terminal-kit' ).terminal
 const axios = require('axios')
@@ -26,6 +25,8 @@ const serverRegex = /((([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0
 const base64Encode = str => Buffer.from(str).toString('base64')
 const base64Decode = str => Buffer.from(str, 'base64').toString('utf8')
 
+const nonce = length => Array.from({length},()=>[...'abcdefghijklmnopqrstuvwxyz0123456789'][Math.floor(Math.random()*36)]).join('')
+
 const tableOptions = {
     hasBorder: true,
     borderChars: 'light',
@@ -35,7 +36,7 @@ const tableOptions = {
     firstColumnTextAttr: { color: 'yellow' }
 }
 
-const percentToColor = percent => percent > .7 ? '^G' : (percent > .5 ? '^Y' : (percent > .30 ? '^y' : '^r'))
+const percentToColor = percent => percent > .7 ? '^G' : (percent > .5 ? '^Y' : (percent > .3 ? '^y' : '^r'))
 
 const bar = (percent, width) => {
     const partials = ['▏', '▎', '▍', '▌', '▋', '▊', '▉']
@@ -52,7 +53,7 @@ function logRequest(request) {
     let url = new URL(request.url);
     console.log(`> ${request.method.toUpperCase()} ${url.path}`)
     console.log(`> Host: ${url.host}`)
-    
+
     let headers = {}
     headers = Object.assign(headers, request.headers.common);
     headers = Object.assign(headers, request.headers[request.method]);
@@ -64,7 +65,7 @@ function logRequest(request) {
     for (let [header, value] of Object.entries(headers)) {
         console.log(`> ${header}: ${value}`)
     }
-    
+
     console.log('>')
     console.log(util.inspect(request.data, {showHidden: false, depth: null}))
     console.log('')
@@ -80,8 +81,7 @@ function logResponse(response)  {
     console.log('')
 }
 
-function handleRequestError(error, verbose)
-{
+function handleRequestError(error, verbose) {
     if (verbose) {
         if (error.response) {
             logResponse(error.response)
@@ -95,20 +95,32 @@ function handleRequestError(error, verbose)
     }
 }
 
+function displaySwitchChannelState(sw) {
+    const ch = [
+        sw.onoff == 0 ? '^ROff' : '^GOn'
+    ];
+
+    const switchUpdateDate = new Date();
+    switchUpdateDate.setTime(sw.lmTime * 1000) // put time into ms not seconds
+    ch.push(`(${new Intl.DateTimeFormat(process.env.LC_TIME, { dateStyle: 'full', timeStyle: 'long' }).format(switchUpdateDate)})`)
+
+    return ch.join('^ ')
+}
+
 module.exports = class API {
     constructor(host, key, userId, verbose = false) {
         this.host = host
         this.key = key
         this.userId = userId
         this.verbose = verbose
-        
+
         axios.interceptors.request.use(request => {
             if (verbose) {
                 logRequest(request)
             }
             return request
         })
-        
+
         axios.interceptors.response.use(response => {
             if (verbose) {
                 logResponse(response)
@@ -118,7 +130,7 @@ module.exports = class API {
     }
 
     signPacket(packet) {
-        const messageId = md5(uuid4())
+        const messageId = md5(nonce(16) + Date.now())
         const timestamp = Math.floor(Date.now() / 1000)
         const signature = md5(messageId + this.key + timestamp)
 
@@ -148,68 +160,74 @@ module.exports = class API {
                     },
                 }
             )
-        
+
             const data = response.data;
-            
+
             if ('error' in data.payload) {
                 let {code, message} = data.payload.error;
-        
+
                 switch (code) {
                     case 5001:
                         console.error('Incorrect shared key provided.')
                         break;
                 }
-                
+
                 return
             }
-            
+
             const system = data.payload.all.system
-            const digest = data.payload.all.digest
             const hw = system.hardware
             const fw = system.firmware
-            
+
+            const [fwMajor, fwMinor, fwPatch] = fw.version.split('.')
+
             let rows = [
                 ['Device', `${hw.type} ${hw.subType} ${hw.chipType} (hardware:${hw.version} firmware:${fw.version})`],
                 ['UUID', hw.uuid],
                 ['Mac address', hw.macAddress],
                 ['WIFI', `${fw.innerIp} (${fw.wifiMac})`],
             ];
-            
+
             if (fw.server) {
                 rows.push(
-                    ['MQTT broker', `${fw.server}:${fw.port}`],
-                    ['Status', `${system.online.status == 0 ? '^ROffline' : '^GOnline'}`]
-                )
-            } else {
-                rows.push(
-                    ['Status', `^BConfiguration`]
+                    ['MQTT broker', `${fw.server}:${fw.port}`]
                 )
             }
-            
+
+            const status = [
+                '^ROffline',
+                '^GOnline',
+                '^BConfiguration',
+            ];
+
+            rows.push(
+                ['Status', `${status[system.online.status]}`]
+            )
+
             rows.push(
                 ['Credentials', `User: ^C${fw.userId}\nPassword: ^C${this.calculateDevicePassword(hw.macAddress, fw.userId)}`]
             )
-            
-            if (digest.togglex) {
-                let row = ['Switch state']
-                let col = []
-                for (let sw of digest.togglex) {
-                    let ch = [];
-                    if (digest.togglex.length > 1) {
-                        ch.push(`Channel ${sw.channel}:`);
-                    }
-                    ch.push(sw.onoff == 0 ? '^ROff' : '^GOn')
-                    
-                    const switchUpdateDate = new Date();
-                    switchUpdateDate.setTime(sw.lmTime * 1000) // put time into ms not seconds
-                    ch.push(`(${new Intl.DateTimeFormat(process.env.LC_TIME, { dateStyle: 'full', timeStyle: 'long' }).format(switchUpdateDate)})`)
-                    
-                    col.push(ch.join('^ '))
+
+            if (fwMajor == 1) {
+                const control = data.payload.all.control
+                if (control.toggle) {
+                    // we assume control.toggle is one switch on v1
+                    rows.push(['Switch state', displaySwitchChannelState(control.toggle)])
                 }
-                row.push(col.join("\n"));
-                rows.push(row)
+            } else {
+                const digest = data.payload.all.digest
+                if (digest.togglex) {
+                    // we assume digest.togglex is multiple switches on v2
+                    let row = ['Switch state']
+                    let col = []
+                    for (let sw of digest.togglex) {
+                        col.push((digest.togglex.length > 1 ? `Channel ${sw.channel}:` : '') + displaySwitchChannelState(sw))
+                    }
+                    row.push(col.join("\n"));
+                    rows.push(row)
+                }
             }
-            
+
             term.table(
                 rows,
                 tableOptions
@@ -218,7 +236,7 @@ module.exports = class API {
             handleRequestError(error, this.verbose)
         }
     }
-    
+
     async deviceWifiList() {
         const packet = this.signPacket({
             'header':   {
@@ -231,7 +249,7 @@ module.exports = class API {
         try {
             let spinner = await term.spinner({animation:'dotSpinner', rightPadding: ' '})
             term('Getting WIFI list…\n')
-            
+
             const response = await axios.post(
                 `http://${this.host}/config`,
                 packet,
@@ -241,39 +259,39 @@ module.exports = class API {
                     },
                 }
             )
-            
-            
+
+
             spinner.animate(false)
-        
+
             const data = response.data;
-            
+
             if ('error' in data.payload) {
                 let {code, message} = data.payload.error;
-        
+
                 switch (code) {
                     case 5001:
                         console.error('Incorrect shared key provided.')
                         break;
                 }
-                
+
                 return
             }
-            
+
             const wifiList = data.payload.wifiList
-            
+
             let rows = [
                 ['SSID', 'Signal strength'],
             ];
-            
+
             for (const ap of wifiList) {
                 const decodedSsid = base64Decode(ap.ssid);
                 rows.push([decodedSsid ? decodedSsid : `<hidden ${ap.bssid}>`, bar((ap.signal / 100), 20)])
             }
-            
+
             let thisTableOptions = tableOptions
             thisTableOptions.firstColumnTextAttr = { color: 'cyan' }
             thisTableOptions.firstRowTextAttr = { color: 'yellow' }
-            
+
             term.table(
                 rows,
                 tableOptions
@@ -293,12 +311,12 @@ module.exports = class API {
                 port: url.port
             }
         })
-        
+
         // make sure we set a failover server
         if (servers.length == 1) {
             servers.push(servers[0]);
         }
-        
+
         term.table(
             [
                 ['Primary MQTT broker', `${servers[0].host}:${servers[0].port}`],
@@ -348,7 +366,7 @@ module.exports = class API {
     async configureWifiCredentials(credentials) {
         const ssid = base64Encode(credentials.ssid)
         const password = base64Encode(credentials.password)
-        
+
         const packet = this.signPacket({
             'header':   {
                 'method': 'SET',
@@ -361,7 +379,7 @@ module.exports = class API {
                 }
             }
         })
-        
+
         term.table(
             [
                 ['Encoded WIFI SSID', `${ssid}`],
@@ -384,7 +402,7 @@ module.exports = class API {
             handleRequestError(error, this.verbose)
         }
     }
-    
+
     calculateDevicePassword(macAddress, user = null) {
         return `${user}_${md5(macAddress + this.key)}`
     }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-'use strict'
+'use strict';
 
 const {version} = require('../package.json')
 const program = require('commander')
@@ -11,5 +11,6 @@ program
 program
   .command('info [options]', 'get information about compatable Meross smart device')
   .command('setup [options]', 'setup compatable Meross smart device')
+  .command('interactive', 'interactive setup of compatable Meross smart device')
 
 program.parse(process.argv)

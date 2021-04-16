@@ -1,0 +1,194 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const os = require('os')
+
+const {version} = require('../package.json')
+const program = require('commander')
+const util = require('util')
+const termkit = require('terminal-kit')
+const term = termkit.terminal
+
+const {base64Encode, base64Decode, arrayUnique} = require('../lib/utils.js')
+
+const devices = require('../lib/setup.js')
+const Device = require('../lib/Device.js')
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const checkNetwork = () => {
+    for (const iface of Object.values(os.networkInterfaces())) {
+        for (const addr of iface) {
+            if (!addr.internal && addr.address === '10.10.10.2') { // would be better to check the SSID name of the WIFI interface is connected to.
+                return true
+            }
+        }
+    }
+    return false
+}
+
+const wizard = [
+    async (device) => {
+        term.clear()
+        term.bold('Select a device type\n')
+        term('Please select the device type you would like to install.')
+        const response = await term.singleColumnMenu(devices.map(d => d.name)).promise
+
+        return [1, device, devices[response.selectedIndex]]
+    },
+    async (device, deviceType) => {
+        term.clear()
+        term.bold('Plug in Smart Plug\n')
+        term('Plug your Smart Plug in. Press the power button, if the LED is not on.')
+
+        const response = await term.singleColumnMenu(['Back', 'Next']).promise
+
+        let step = 0;
+        if (response.selectedIndex) {
+            step = 2;
+        }
+
+        return [step, device, deviceType]
+    },
+    async (device, deviceType) => {
+        term.clear()
+        term.bold('Check the LED Light\n')
+        term('In about 10 seconds the LED light will begin blinking amber and green slowly.')
+
+        const response = await term.singleColumnMenu(['Back', 'Next', 'The LED is NOT blinking amber and green.']).promise
+
+        let step
+        if (response.selectedIndex == 0) {
+            step = 1
+        } else if (response.selectedIndex == 2) {
+            step = 3
+        } else {
+            step = 4
+        }
+
+        return [step, device, deviceType]
+    },
+    async (device, deviceType) => {
+        term.clear()
+        term.bold('Start configuration\n')
+        term('Press and hold the power button for 5 seconds. Wait about 20 seconds until the LED light starts blinking amber and green.')
+
+        const response = await term.singleColumnMenu(['Got it']).promise
+
+        return [2, device, deviceType]
+    },
+    async (device, deviceType) => {
+        term.clear()
+        term.bold('Connect to Device\n')
+        term('Connect to the device Wi-Fi')
+
+        const response = await term.singleColumnMenu(['Back', 'I\'m connected to the device Wi-Fi.']).promise
+
+        if (response.selectedIndex == 0) {
+            return [2, device, deviceType]
+        }
+
+        let step = 5
+        if (checkNetwork()) {
+            device.lan.ip = '10.10.10.1'
+        } else {
+            term('\n').eraseLineAfter.red(`You are not connected to the ${deviceType.wifiName} Wi-Fi.\n`)
+            await delay(1000)
+            step = 4
+        }
+
+        return [step, device, deviceType]
+    },
+    async (device, deviceType) => {
+        term.clear()
+        term.bold('Join Your Home Wi-Fi\n')
+        const spinner = await term.spinner({animation:'dotSpinner', rightPadding: ' '})
+        term('Loading Wi-Fi list')
+
+        const wifiList = await device.listWifi()
+        const wifis = wifiList.filter(arrayUnique).filter(v => v.ssid !== '')
+
+        spinner.animate(0);
+
+        term.clear()
+        term.bold('Join Your Home Wi-Fi\n')
+        term('Select your home network')
+
+        const wifiResponse = await term.singleColumnMenu(wifis.map(v => base64Decode(v.ssid))).promise
+        device.wifi = wifis[wifiResponse.selectedIndex]
+
+        term.clear()
+        term.bold('Join Your Home Wi-Fi\n')
+        term('^G%s\n', base64Decode(device.wifi.ssid))
+        term('Please enter your Wi-Fi password to connect your device to your home network\n')
+
+        const passwordResponse = await term.inputField({default: ''}).promise
+        device.wifi.password = passwordResponse
+
+        return [6, device, deviceType]
+    },
+    async (device, deviceType) => {
+        console.log(device)
+        process.exit()
+    }
+]
+
+
+async function main() {
+    term.on('key', function(name , matches , data) {
+	       if (name === 'CTRL_C') {
+               process.exit()
+           }
+    })
+
+    let step = 0
+    let device = new Device()
+    let deviceType = null
+
+    // keep looping until we have all the answers we need
+    while (true) {
+        [step, device, deviceType] = await wizard[step](device, deviceType)
+    }
+    // wizard
+    // term.clear()
+    // term.bold('Select a device type\n')
+    // term('Please select the device type you would like to install.')
+    // const deviceTypeResponse = await term.singleColumnMenu(wizard.map(d => d.name)).promise
+    // const deviceType = wizard[deviceTypeResponse.selectedIndex];
+    //
+    // const device = new Device('10.10.10.1')
+
+
+    const steps = deviceType.setup
+
+
+    // keep looping until we have all the answers we need
+    while (true) {
+        let currentStep = Object.create({}, steps[step])
+        console.log(currentStep)
+        process.exit();
+        if (undefined !== currentStep.init) {
+            currentStep.init()
+        }
+        currentStep.device = device
+
+        term.clear()
+        term.bold(`${currentStep.title}\n`)
+        term(currentStep.description)
+
+        const buttons = await currentStep.buttons(device)
+        const displayAs = undefined !== currentStep.buttonDisplay ? currentStep.buttonDisplay : 'singleColumnMenu'
+
+        const answer = await term[displayAs](buttons.map(b => b.label)).promise
+        const selected = buttons[answer.selectedIndex]
+
+        if (undefined === selected.valid || selected.valid()) {
+            step = selected.goto(step)
+        }
+    }
+
+
+    process.exit();
+}
+main();
